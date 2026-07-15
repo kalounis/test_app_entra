@@ -1,4 +1,2 @@
 streamlit>=1.32
 msal>=1.28
-base64
-json
