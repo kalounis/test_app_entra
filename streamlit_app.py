@@ -28,6 +28,8 @@ cca = get_msal_app()
 
 if "account" not in st.session_state:
     st.session_state.account = None
+if "id_token_claims" not in st.session_state:
+    st.session_state.id_token_claims = None
 if "access_token_claims" not in st.session_state:
     st.session_state.access_token_claims = None
 if "want_protected" not in st.session_state:
@@ -61,11 +63,11 @@ if "code" in params:
         result = cca.acquire_token_by_authorization_code(
             code, scopes=SCOPES, redirect_uri=REDIRECT_URI
         )
-        if "access_token_claims" in result:
-            st.session_state.account = result["access_token_claims"].get(
+        if "id_token_claims" in result:
+            st.session_state.account = result["id_token_claims"].get(
                 "preferred_username", "utilisateur"
             )
-            st.session_state.access_token_claims = result["access_token_claims"]
+            st.session_state.id_token_claims = result["id_token_claims"]
         else:
             st.error(
                 f"Échec de l'authentification : {result.get('error_description', result)}"
@@ -90,9 +92,9 @@ else:
     st.success(f"Connecté en tant que **{st.session_state.account}**")
 
     if has_stepup_context():
-        st.info(f"Contexte d'authentification step-up ({STEPUP_ACR_VALUE}) : ✅ présent")
+        st.info(f"Contexte d'authentification step-up (`{STEPUP_ACR_VALUE}`) : ✅ présent")
     else:
-        st.warning(f"Contexte d'authentification step-up ({STEPUP_ACR_VALUE}) : ❌ absent")
+        st.warning(f"Contexte d'authentification step-up (`{STEPUP_ACR_VALUE}`) : ❌ absent")
 
     st.divider()
     st.subheader("Action sensible")
@@ -103,8 +105,8 @@ else:
     if st.session_state.want_protected:
         if has_stepup_context():
             st.success("✅ Accès accordé à l'action sensible")
-            with st.expander("Claims de l'access token"):
-                st.json(st.session_state.access_token_claims)
+            with st.expander("Claims de l'id_token"):
+                st.json(st.session_state.id_token_claims)
         else:
             st.error("🔒 Authentification renforcée requise pour cette action")
             stepup_url = build_auth_url(
@@ -121,6 +123,6 @@ else:
     st.divider()
     if st.button("Se déconnecter (local)"):
         st.session_state.account = None
-        st.session_state.access_token_claims = None
+        st.session_state.id_token_claims = None
         st.session_state.want_protected = False
         st.rerun()
