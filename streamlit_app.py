@@ -9,7 +9,7 @@ TENANT_ID = st.secrets["TENANT_ID"]
 CLIENT_ID = st.secrets["CLIENT_ID"]
 CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
 REDIRECT_URI = st.secrets["REDIRECT_URI"]
-STEPUP_ACR_VALUE = st.secrets.get("STEPUP_ACR_VALUE", "c1")
+STEPUP_ACR_VALUE = st.secrets.get("STEPUP_ACR_VALUE", "c3")
 SCOPES = ["User.Read"]
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
