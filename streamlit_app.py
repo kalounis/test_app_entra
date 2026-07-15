@@ -1,3 +1,4 @@
+import base64
 import json
 
 import msal
@@ -10,6 +11,7 @@ CLIENT_ID = st.secrets["CLIENT_ID"]
 CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
 REDIRECT_URI = st.secrets["REDIRECT_URI"]
 STEPUP_ACR_VALUE = st.secrets.get("STEPUP_ACR_VALUE", "c3")
+
 SCOPES = ["User.Read"]
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
@@ -26,101 +28,150 @@ def get_msal_app():
 
 cca = get_msal_app()
 
+
+def decode_jwt(token):
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
+
+
 if "account" not in st.session_state:
     st.session_state.account = None
+
 if "id_token_claims" not in st.session_state:
     st.session_state.id_token_claims = None
+
+if "access_token_claims" not in st.session_state:
+    st.session_state.access_token_claims = None
+
 if "want_protected" not in st.session_state:
     st.session_state.want_protected = False
 
 
 def build_auth_url(claims_challenge=None, state=None):
     return cca.get_authorization_request_url(
-        SCOPES,
+        scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
         state=state,
-        claims_challenge=json.dumps(claims_challenge) if claims_challenge else None,
+        prompt="login",
+        claims_challenge=json.dumps(claims_challenge)
+        if claims_challenge
+        else None,
     )
 
 
 def has_stepup_context():
-    claims = st.session_state.id_token_claims
-    if not claims or "acrs" not in claims:
+    claims = st.session_state.access_token_claims
+
+    if claims is None:
+        claims = st.session_state.id_token_claims
+
+    if claims is None:
         return False
-    acrs = claims["acrs"]
+
+    acrs = claims.get("acrs")
+
+    if not acrs:
+        return False
+
     if isinstance(acrs, str):
         acrs = [acrs]
+
     return STEPUP_ACR_VALUE in acrs
 
 
-# --- Traitement du retour Entra ID (code d'autorisation présent dans l'URL) ---
 params = st.query_params
+
 if "code" in params:
     code = params["code"]
-    try:
-        result = cca.acquire_token_by_authorization_code(
-            code, scopes=SCOPES, redirect_uri=REDIRECT_URI
-        )
-        if "id_token_claims" in result:
-            st.session_state.account = result["id_token_claims"].get(
-                "preferred_username", "utilisateur"
-            )
-            st.session_state.id_token_claims = result["id_token_claims"]
-        else:
-            st.error(
-                f"Échec de l'authentification : {result.get('error_description', result)}"
-            )
-    except Exception as e:
-        st.error(f"Erreur lors de l'échange du code : {e}")
-    finally:
-        st.query_params.clear()
-        st.rerun()
 
-# --- Interface ---
-st.title("🔐 Demo Step-up MFA — Entra ID")
+    result = cca.acquire_token_by_authorization_code(
+        code,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+    )
+
+    if "id_token_claims" in result:
+
+        st.session_state.account = result["id_token_claims"].get(
+            "preferred_username", "utilisateur"
+        )
+
+        st.session_state.id_token_claims = result["id_token_claims"]
+
+        if "access_token" in result:
+            st.session_state.access_token_claims = decode_jwt(
+                result["access_token"]
+            )
+
+    else:
+        st.error(result)
+
+    st.query_params.clear()
+    st.rerun()
+
+
+st.title("🔐 Demo Step-up MFA")
 
 if not st.session_state.account:
-    st.write("Vous n'êtes pas connecté.")
+
     login_url = build_auth_url(state="login")
+
     st.markdown(
         f'<a href="{login_url}" target="_self">➡️ Se connecter</a>',
         unsafe_allow_html=True,
     )
+
 else:
-    st.success(f"Connecté en tant que **{st.session_state.account}**")
+
+    st.success(f"Connecté : {st.session_state.account}")
 
     if has_stepup_context():
-        st.info(f"Contexte d'authentification step-up (`{STEPUP_ACR_VALUE}`) : ✅ présent")
+        st.success(f"Step-up {STEPUP_ACR_VALUE} présent")
     else:
-        st.warning(f"Contexte d'authentification step-up (`{STEPUP_ACR_VALUE}`) : ❌ absent")
+        st.error(f"Step-up {STEPUP_ACR_VALUE} absent")
 
-    st.divider()
-    st.subheader("Action sensible")
+    with st.expander("ID Token"):
+        st.json(st.session_state.id_token_claims)
+
+    with st.expander("Access Token"):
+        st.json(st.session_state.access_token_claims)
 
     if st.button("Tester l'action sensible"):
         st.session_state.want_protected = True
 
     if st.session_state.want_protected:
+
         if has_stepup_context():
-            st.success("✅ Accès accordé à l'action sensible")
-            with st.expander("Claims de l'id_token"):
-                st.json(st.session_state.id_token_claims)
+
+            st.success("Accès autorisé")
+
         else:
-            st.error("🔒 Authentification renforcée requise pour cette action")
+
+            st.error("Step-up requis")
+
             stepup_url = build_auth_url(
                 claims_challenge={
-                    "id_token": {"acrs": {"essential": True, "value": STEPUP_ACR_VALUE}}
+                    "access_token": {
+                        "acrs": {
+                            "essential": True,
+                            "value": STEPUP_ACR_VALUE,
+                        }
+                    }
                 },
                 state="stepup",
             )
+
             st.markdown(
-                f'<a href="{stepup_url}" target="_self">➡️ Effectuer le step-up MFA</a>',
+                f'<a href="{stepup_url}" target="_self">➡️ Effectuer le Step-up</a>',
                 unsafe_allow_html=True,
             )
 
-    st.divider()
-    if st.button("Se déconnecter (local)"):
+    if st.button("Déconnexion"):
+
         st.session_state.account = None
         st.session_state.id_token_claims = None
+        st.session_state.access_token_claims = None
         st.session_state.want_protected = False
+
         st.rerun()
