@@ -3,7 +3,14 @@ import json
 import msal
 import streamlit as st
 
-st.set_page_config(page_title="Demo Step-up MFA - Entra ID", page_icon="🔐")
+st.set_page_config(
+    page_title="Demo Step-up MFA - Entra ID",
+    page_icon="🔐",
+)
+
+# ------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------
 
 TENANT_ID = st.secrets["TENANT_ID"]
 CLIENT_ID = st.secrets["CLIENT_ID"]
@@ -12,10 +19,14 @@ REDIRECT_URI = st.secrets["REDIRECT_URI"]
 
 STEPUP_ACR_VALUE = st.secrets.get("STEPUP_ACR_VALUE", "c3")
 
-SCOPES = ["openid", "profile", "email", "User.Read"]
+SCOPES = ["User.Read"]
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
+
+# ------------------------------------------------------------------
+# MSAL
+# ------------------------------------------------------------------
 
 @st.cache_resource
 def get_msal_app():
@@ -28,49 +39,49 @@ def get_msal_app():
 
 cca = get_msal_app()
 
-# --------------------------------------------------------------------
-# Session state
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Session State
+# ------------------------------------------------------------------
 
-defaults = {
-    "account": None,
-    "id_token_claims": None,
-    "login_claims": None,
-    "stepup_claims": None,
-    "want_protected": False,
-    "last_state": None,
-}
+if "account" not in st.session_state:
+    st.session_state.account = None
 
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+if "id_token_claims" not in st.session_state:
+    st.session_state.id_token_claims = None
+
+if "login_claims" not in st.session_state:
+    st.session_state.login_claims = None
+
+if "stepup_claims" not in st.session_state:
+    st.session_state.stepup_claims = None
+
+if "last_state" not in st.session_state:
+    st.session_state.last_state = None
+
+if "want_protected" not in st.session_state:
+    st.session_state.want_protected = False
 
 
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------
 # Helpers
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------
 
+def build_auth_url(state, claims_challenge=None):
 
-def build_auth_url(state, claims_challenge=None, force_login=False):
-    kwargs = {
-        "scopes": SCOPES,
-        "redirect_uri": REDIRECT_URI,
-        "state": state,
-    }
-
-    if claims_challenge:
-        kwargs["claims_challenge"] = json.dumps(claims_challenge)
-
-    url = cca.get_authorization_request_url(**kwargs)
-
-    if force_login:
-        separator = "&" if "?" in url else "?"
-        url += f"{separator}prompt=login"
-
-    return url
+    return cca.get_authorization_request_url(
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+        state=state,
+        claims_challenge=(
+            json.dumps(claims_challenge)
+            if claims_challenge
+            else None
+        ),
+    )
 
 
 def get_acrs(claims):
+
     if not claims:
         return []
 
@@ -83,48 +94,49 @@ def get_acrs(claims):
 
 
 def has_stepup_context():
-    claims = st.session_state.id_token_claims
 
-    if not claims:
+    if not st.session_state.id_token_claims:
         return False
 
-    acrs = get_acrs(claims)
+    return STEPUP_ACR_VALUE in get_acrs(
+        st.session_state.id_token_claims
+    )
 
-    return STEPUP_ACR_VALUE in acrs
 
+def show_claims(title, claims):
 
-def show_claim_summary(claims, title):
     st.subheader(title)
 
     if not claims:
-        st.info("Aucun claim")
+        st.info("Aucune donnée")
         return
 
-    st.write("**acrs**")
+    st.write("### ACRS")
     st.code(json.dumps(claims.get("acrs", []), indent=2))
 
-    st.write("**amr**")
+    st.write("### AMR")
     st.code(json.dumps(claims.get("amr", []), indent=2))
 
-    st.write("**auth_time**")
+    st.write("### AUTH_TIME")
     st.code(str(claims.get("auth_time")))
 
     with st.expander("Claims complets"):
         st.json(claims)
 
 
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------
 # Callback Entra ID
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 params = st.query_params
 
 if "code" in params:
 
     code = params["code"]
-    state = params.get("state")
+    state = params.get("state", "")
 
     try:
+
         result = cca.acquire_token_by_authorization_code(
             code=code,
             scopes=SCOPES,
@@ -137,7 +149,7 @@ if "code" in params:
 
             st.session_state.account = claims.get(
                 "preferred_username",
-                claims.get("upn", "User"),
+                "user",
             )
 
             st.session_state.id_token_claims = claims
@@ -150,75 +162,82 @@ if "code" in params:
                 st.session_state.stepup_claims = claims
 
         else:
+
             st.error(
                 result.get(
                     "error_description",
-                    json.dumps(result, indent=2),
+                    str(result),
                 )
             )
 
     except Exception as ex:
+
         st.error(str(ex))
 
     finally:
+
         st.query_params.clear()
         st.rerun()
 
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------
 # UI
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------
 
-st.title("🔐 Demo Step-up MFA - Diagnostic")
+st.title("🔐 Diagnostic Authentication Context")
 
 if not st.session_state.account:
 
-    st.warning("Non connecté")
+    st.warning("Utilisateur non connecté")
 
-    login_url = build_auth_url(
-        state="login",
-        force_login=True,
-    )
+    login_url = build_auth_url("login")
 
-    st.markdown(
-        f'{login_url}➡️ Connexion</a>',
-        unsafe_allow_html=True,
+    st.link_button(
+        "➡️ Se connecter",
+        login_url,
     )
 
 else:
 
-    st.success(f"Connecté : {st.session_state.account}")
+    st.success(
+        f"Connecté en tant que {st.session_state.account}"
+    )
 
-    st.write("### Diagnostic")
+    st.write("---")
 
     st.write(
-        f"**Dernier flow exécuté :** {st.session_state.last_state}"
+        f"Dernier flow exécuté : **{st.session_state.last_state}**"
     )
 
     st.write(
-        f"**Step-up détecté :** {'✅ OUI' if has_stepup_context() else '❌ NON'}"
+        f"Authentication Context recherché : **{STEPUP_ACR_VALUE}**"
     )
 
-    st.write(
-        f"**ACR recherché :** {STEPUP_ACR_VALUE}"
-    )
+    if has_stepup_context():
+        st.success(
+            f"Context {STEPUP_ACR_VALUE} détecté"
+        )
+    else:
+        st.warning(
+            f"Context {STEPUP_ACR_VALUE} absent"
+        )
 
-    st.divider()
+    st.write("---")
 
-    show_claim_summary(
-        st.session_state.login_claims,
+    show_claims(
         "Claims du login initial",
+        st.session_state.login_claims,
     )
 
-    st.divider()
+    st.write("---")
 
-    show_claim_summary(
+    show_claims(
+        "Claims du step-up",
         st.session_state.stepup_claims,
-        "Claims du flow step-up",
     )
 
-    st.divider()
+    st.write("---")
 
-    if st.button("Tester l'action sensible"):
+    if st.button("Tester action sensible"):
         st.session_state.want_protected = True
 
     if st.session_state.want_protected:
@@ -226,13 +245,13 @@ else:
         if has_stepup_context():
 
             st.success(
-                f"✅ Contexte {STEPUP_ACR_VALUE} présent"
+                "✅ Accès accordé"
             )
 
         else:
 
             st.error(
-                f"🔒 Contexte {STEPUP_ACR_VALUE} absent"
+                "🔒 Step-up requis"
             )
 
             claims_challenge = {
@@ -247,19 +266,22 @@ else:
             stepup_url = build_auth_url(
                 state="stepup",
                 claims_challenge=claims_challenge,
-                force_login=True,
             )
 
-            st.markdown(
-                f'{stepup_url}➡️ Lancer le step-up</a>',
-                unsafe_allow_html=True,
+            st.link_button(
+                "➡️ Lancer le step-up",
+                stepup_url,
             )
 
-    st.divider()
+    st.write("---")
 
-    if st.button("Reset session"):
+    if st.button("Réinitialiser la session"):
 
-        for k in list(defaults.keys()):
-            st.session_state[k] = defaults[k]
+        st.session_state.account = None
+        st.session_state.id_token_claims = None
+        st.session_state.login_claims = None
+        st.session_state.stepup_claims = None
+        st.session_state.last_state = None
+        st.session_state.want_protected = False
 
         st.rerun()
