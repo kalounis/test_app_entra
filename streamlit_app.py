@@ -30,8 +30,6 @@ if "account" not in st.session_state:
     st.session_state.account = None
 if "id_token_claims" not in st.session_state:
     st.session_state.id_token_claims = None
-if "access_token_claims" not in st.session_state:
-    st.session_state.access_token_claims = None
 if "want_protected" not in st.session_state:
     st.session_state.want_protected = False
 
@@ -46,7 +44,7 @@ def build_auth_url(claims_challenge=None, state=None):
 
 
 def has_stepup_context():
-    claims = st.session_state.access_token_claims
+    claims = st.session_state.id_token_claims
     if not claims or "acrs" not in claims:
         return False
     acrs = claims["acrs"]
@@ -111,7 +109,7 @@ else:
             st.error("🔒 Authentification renforcée requise pour cette action")
             stepup_url = build_auth_url(
                 claims_challenge={
-                    "access_token": {"acrs": {"essential": True, "value": STEPUP_ACR_VALUE}}
+                    "id_token": {"acrs": {"essential": True, "value": STEPUP_ACR_VALUE}}
                 },
                 state="stepup",
             )
