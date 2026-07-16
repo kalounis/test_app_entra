@@ -22,9 +22,7 @@ AUTH_CONTEXT_ID = st.secrets.get("STEPUP_ACR_VALUE", "c3")
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
-SCOPES = [
-    "User.Read"
-]
+SCOPES = ["User.Read"]
 
 # ============================================================
 # MSAL
@@ -48,7 +46,8 @@ app = get_app()
 
 defaults = {
     "account": None,
-    "access_claims": None,
+    "id_token_claims": None,       # source de verite pour "acrs" (ID token, propre a votre app)
+    "access_token_claims": None,   # garde uniquement a titre de comparaison/diagnostic
     "login_claims": None,
     "stepup_claims": None,
     "want_sensitive": False,
@@ -60,7 +59,7 @@ for k, v in defaults.items():
 
 
 # ============================================================
-# JWT DECODER
+# JWT DECODER (utilise uniquement pour l'access token, a titre de diagnostic)
 # ============================================================
 
 def decode_jwt(token):
@@ -70,9 +69,7 @@ def decode_jwt(token):
         return {}
 
     payload = parts[1]
-
     payload += "=" * ((4 - len(payload) % 4) % 4)
-
     decoded = base64.urlsafe_b64decode(payload)
 
     return json.loads(decoded)
@@ -83,44 +80,44 @@ def decode_jwt(token):
 # ============================================================
 
 def build_auth_url(state, claims=None):
-
     return app.get_authorization_request_url(
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
         state=state,
-        claims_challenge=json.dumps(claims)
-        if claims
-        else None,
+        claims_challenge=json.dumps(claims) if claims else None,
     )
 
 
 def get_acrs(claims):
-
     if not claims:
         return []
-
     acrs = claims.get("acrs", [])
-
     if isinstance(acrs, str):
         acrs = [acrs]
-
     return acrs
 
 
 def has_auth_context(context_id):
-
-    claims = st.session_state.access_claims
-
+    # On verifie sur l'ID token, pas sur l'access token Graph :
+    # c'est le jeton emis pour VOTRE app, entierement sous votre controle.
+    claims = st.session_state.id_token_claims
     if not claims:
         return False
+    return context_id in get_acrs(claims)
 
-    acrs = get_acrs(claims)
 
-    return context_id in acrs
+# Codes amr généralement considérés comme phishing-resistant par Entra ID
+PHISHING_RESISTANT_AMR_HINTS = {
+    "wia": "Windows Integrated Auth / Windows Hello for Business",
+    "face": "Windows Hello (visage)",
+    "fpt": "Windows Hello / biométrie (empreinte)",
+    "hwk": "Clé matérielle (FIDO2 / clé de sécurité)",
+    "swk": "Clé logicielle",
+    "csig": "Authentification par certificat",
+}
 
 
 def show_claims(title, claims):
-
     st.subheader(title)
 
     if not claims:
@@ -130,8 +127,22 @@ def show_claims(title, claims):
     st.write("#### acrs")
     st.code(json.dumps(claims.get("acrs"), indent=2))
 
-    st.write("#### amr")
-    st.code(json.dumps(claims.get("amr"), indent=2))
+    amr = claims.get("amr") or []
+    st.write("#### amr (méthode(s) d'authentification réellement utilisée(s))")
+    st.code(json.dumps(amr, indent=2))
+
+    matched = [PHISHING_RESISTANT_AMR_HINTS[m] for m in amr if m in PHISHING_RESISTANT_AMR_HINTS]
+    if matched:
+        st.warning(
+            "⚠️ Cette connexion utilise déjà une méthode potentiellement "
+            f"phishing-resistant : {', '.join(matched)}. C'est probablement "
+            "ce qui explique la présence de l'acrs correspondant, "
+            "indépendamment de toute demande explicite de step-up."
+        )
+
+    if claims.get("auth_time"):
+        st.write("#### auth_time (horodatage de la dernière authentification)")
+        st.code(str(claims.get("auth_time")))
 
     st.write("#### xms_cc")
     st.code(json.dumps(claims.get("xms_cc"), indent=2))
@@ -147,42 +158,38 @@ def show_claims(title, claims):
 params = st.query_params
 
 if "code" in params:
-
     code = params["code"]
     state = params.get("state", "unknown")
 
     try:
-
         token_result = app.acquire_token_by_authorization_code(
             code=code,
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI,
         )
 
-        if "access_token" not in token_result:
-
+        if "id_token_claims" not in token_result:
             st.error(token_result)
             st.stop()
 
-        access_token = token_result["access_token"]
+        id_claims = token_result["id_token_claims"]
+        st.session_state.id_token_claims = id_claims
 
-        access_claims = decode_jwt(access_token)
-
-        st.session_state.access_claims = access_claims
+        # Access token garde uniquement pour comparaison / diagnostic
+        if "access_token" in token_result:
+            st.session_state.access_token_claims = decode_jwt(token_result["access_token"])
 
         username = (
-            access_claims.get("preferred_username")
-            or access_claims.get("upn")
+            id_claims.get("preferred_username")
+            or id_claims.get("upn")
             or "user"
         )
-
         st.session_state.account = username
 
         if state == "login":
-            st.session_state.login_claims = access_claims
-
+            st.session_state.login_claims = id_claims
         if state == "stepup":
-            st.session_state.stepup_claims = access_claims
+            st.session_state.stepup_claims = id_claims
 
     except Exception as e:
         st.error(str(e))
@@ -196,7 +203,6 @@ if "code" in params:
 # ============================================================
 
 st.title("🔐 Authentication Context Test")
-
 st.write(f"Context cible : **{AUTH_CONTEXT_ID}**")
 
 # ------------------------------------------------------------
@@ -204,51 +210,44 @@ st.write(f"Context cible : **{AUTH_CONTEXT_ID}**")
 # ------------------------------------------------------------
 
 if not st.session_state.account:
-
-    login_url = build_auth_url(
-        state="login"
-    )
-
-    st.link_button(
-        "➡️ Se connecter",
-        login_url,
-    )
-
+    login_url = build_auth_url(state="login")
+    st.link_button("➡️ Se connecter", login_url)
     st.stop()
 
 # ------------------------------------------------------------
 # CONNECTED
 # ------------------------------------------------------------
 
-st.success(
-    f"Connecté : {st.session_state.account}"
-)
+st.success(f"Connecté : {st.session_state.account}")
 
 if has_auth_context(AUTH_CONTEXT_ID):
-
-    st.success(
-        f"Authentication Context {AUTH_CONTEXT_ID} présent"
-    )
-
+    st.success(f"Authentication Context {AUTH_CONTEXT_ID} présent (ID token)")
 else:
+    st.warning(f"Authentication Context {AUTH_CONTEXT_ID} absent (ID token)")
 
-    st.warning(
-        f"Authentication Context {AUTH_CONTEXT_ID} absent"
-    )
+# Diagnostic : compare ID token vs access token, pour visualiser
+# une eventuelle evaluation opportuniste differente entre les deux jetons.
+if st.session_state.access_token_claims:
+    access_acrs = get_acrs(st.session_state.access_token_claims)
+    id_acrs = get_acrs(st.session_state.id_token_claims)
+    if set(access_acrs) != set(id_acrs):
+        st.info(
+            "ℹ️ Les valeurs `acrs` diffèrent entre l'ID token "
+            f"({id_acrs}) et l'access token Graph ({access_acrs}). "
+            "C'est normal : chaque type de jeton est évalué "
+            "individuellement par l'évaluation opportuniste."
+        )
 
 # ------------------------------------------------------------
 # DEBUG
 # ------------------------------------------------------------
 
-show_claims(
-    "Claims login",
-    st.session_state.login_claims,
-)
+show_claims("Claims ID token — login", st.session_state.login_claims)
+show_claims("Claims ID token — step-up", st.session_state.stepup_claims)
 
-show_claims(
-    "Claims step-up",
-    st.session_state.stepup_claims,
-)
+if st.session_state.access_token_claims:
+    with st.expander("Access token Graph (diagnostic uniquement)"):
+        st.json(st.session_state.access_token_claims)
 
 # ------------------------------------------------------------
 # ACTION SENSIBLE
@@ -260,21 +259,13 @@ if st.button("Tester action sensible"):
     st.session_state.want_sensitive = True
 
 if st.session_state.want_sensitive:
-
     if has_auth_context(AUTH_CONTEXT_ID):
-
-        st.success(
-            "✅ Accès autorisé"
-        )
-
+        st.success("✅ Accès autorisé")
     else:
-
-        st.error(
-            "🔒 Authentication Context requis"
-        )
+        st.error("🔒 Authentication Context requis")
 
         claims = {
-            "access_token": {
+            "id_token": {
                 "acrs": {
                     "essential": True,
                     "value": AUTH_CONTEXT_ID,
@@ -282,25 +273,16 @@ if st.session_state.want_sensitive:
             }
         }
 
-        stepup_url = build_auth_url(
-            state="stepup",
-            claims=claims,
-        )
-
-        st.link_button(
-            "➡️ Effectuer le step-up",
-            stepup_url,
-        )
+        stepup_url = build_auth_url(state="stepup", claims=claims)
+        st.link_button("➡️ Effectuer le step-up", stepup_url)
 
 # ------------------------------------------------------------
-# LOGOUT
+# RESET
 # ------------------------------------------------------------
 
 st.divider()
 
 if st.button("Reset session"):
-
     for k in defaults.keys():
         st.session_state[k] = defaults[k]
-
     st.rerun()
